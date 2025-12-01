@@ -1,5 +1,5 @@
 # Issue Log:
-1. Needed a way to test if the PWM signal to the audio output was working
+1. Needed a way to test if the PWM signal to the audio output was working  
 Solution: 
 - Modify the constraints (.xdc) file by remapping pin H17 (corresponds to LED 0 on the FPGA board) to the 'audio_pwm_output' signal.
 - Remap pin A11 (the actual pwm output signal) to LED 0 temporarily for testing purposes, and to avoid errors when generating bitstream.
