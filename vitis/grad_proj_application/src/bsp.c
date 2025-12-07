@@ -18,7 +18,8 @@ volatile u32 delay_samples = DELAY_SAMPLES_DEFAULT;
 volatile u32 samples_written = 0;
 
 // variables used in sampling_ISR() for printing statistics and collecting the DC offset of the raw data
-static int32_t dc_bias = 0;
+static int32_t dc_bias_drift = 0;
+static int32_t dc_bias_static = 0;
 static int first_run = 1; // just a simple flag
 
 static int32_t hp_filter_state = 0;
@@ -51,50 +52,41 @@ void sampling_ISR() {
 	// refer to stream_grabber.c from lab3a for why this is necessary
 	// BASEADDR + 4 is the offset of where you "select" which index to read from the stream grabber
 	// BASEADDR + 8 is the offset of where you actually read the raw data of the mic
-//	int32_t samples[NUM_INPUT_SAMPLES];
-//	for (int i = 0; i < NUM_INPUT_SAMPLES; i++) {
-//		Xil_Out32(XPAR_MIC_BLOCK_STREAM_GRABBER_0_BASEADDR + 4, i);
-//		samples[i] = (int32_t)Xil_In32(XPAR_MIC_BLOCK_STREAM_GRABBER_0_BASEADDR + 8);
-//	}
-//
-//	int32_t sum = 0;
-//	for (int i = 0; i < NUM_INPUT_SAMPLES; i++) {
-//		sum += samples[i];
-//	}
-//	int32_t curr_sample = sum / NUM_INPUT_SAMPLES;
 
 	Xil_Out32(XPAR_MIC_BLOCK_STREAM_GRABBER_0_BASEADDR + 4, 0);
 	int32_t curr_sample = (int32_t) Xil_In32(XPAR_MIC_BLOCK_STREAM_GRABBER_0_BASEADDR + 8);
 
     // set first sample from mic as the dc_bias
     if (first_run) {
-        dc_bias = curr_sample;
+        dc_bias_static = curr_sample;
         first_run = 0;
     }
 
 	// self note: try to comment out this exponential moving average and see how it affects our audio signal
     // Exponential Moving Average
 	// this line expands to: dc_bias = dc_bias + ((curr_sample - dc_bias) >> 10);
-    //dc_bias += (curr_sample - dc_bias) >> 10;
+    dc_bias_drift += (curr_sample - dc_bias_drift) >> 10;
+
+//    if ((dc_bias_drift > curr_sample + 100000) || (dc_bias_drift < curr_sample - 100000)) {
+//    	dc_bias_drift = dc_bias_static;
+//    }
 
     // remove the DC offset from the current sample
-    int32_t audio_signal = curr_sample - dc_bias;
+    int32_t audio_signal = curr_sample - dc_bias_drift;
 
     // HIGH-PASS FILTER (removes low-frequency rumble)
-    // int32_t hp_input = audio_signal;
-//    hp_filter_state = hp_filter_state + ((audio_signal - hp_filter_state) * HP_FILTER_COEFF >> 8);
-//    int32_t filtered_signal = audio_signal - hp_filter_state;
-//
-//    int32_t hpf_signal = filtered_signal >> 15;
+    hp_filter_state = hp_filter_state + ((audio_signal - hp_filter_state) * HP_FILTER_COEFF >> 8);
+    int32_t filtered_signal = audio_signal - hp_filter_state;
+
+    // int32_t hpf_signal = filtered_signal >> 15;
 
     // LPF filter to remove squeals?
-    int32_t lp_input = audio_signal;
-    lp_filter_state = lp_filter_state + ((lp_input - lp_filter_state) * LP_FILTER_COEFF >> 8);
+    lp_filter_state = lp_filter_state + ((filtered_signal - lp_filter_state) * LP_FILTER_COEFF >> 8);
 
     // now that we preserve the sign, we can shift safely
 	// scale the signal down to a nice number ideally between -1024 and 1024
-    //int32_t scaled_signal = audio_signal >> 16; // change num back to 15 if it sounds bad
-    int32_t scaled_signal = lp_filter_state >> 16;
+    int32_t scaled_signal = audio_signal >> 16; // change num back to 15 if it sounds bad
+    //int32_t scaled_signal = lp_filter_state >> 16;
 
     //int32_t scaled_signal_before_agc = scaled_signal;
 
@@ -221,20 +213,13 @@ void sampling_ISR() {
     if (pwm_sample < 0) pwm_sample = 0;
     if (pwm_sample > RESET_VALUE) pwm_sample = RESET_VALUE;
 
-	if (sys_tick_counter >= 24000) {  // Print once per second at 48kHz
+	if (sys_tick_counter >= 72000) {  // Print once per second at 48kHz
 //		xil_printf("=== Signal Processing Debug ===\r\n");
-//		xil_printf("Raw sample:        %ld\r\n", curr_sample);
-//		xil_printf("DC bias:            %ld\r\n", dc_bias);
-//		xil_printf("After DC removal:   %ld\r\n", audio_signal);
-//		xil_printf("HP filter state:    %ld\r\n", hp_filter_state);
-//		xil_printf("After HP filter:    %ld\r\n", filtered_signal);
-//		xil_printf("After scaling w/HPF: %ld\r\n", hpf_signal);
-//		xil_printf("After scaling:      %ld\r\n", scaled_signal_before_agc);
+		xil_printf("Raw sample:        %ld\r\n", curr_sample);
+		xil_printf("DC bias(static):            %ld\r\n", dc_bias_static);
+		xil_printf("DC bias(drift):            %ld\r\n", dc_bias_drift);
 		xil_printf("Input level:        %ld (threshold: %d)\r\n", input_level, AGC_THRESHOLD);
-//		xil_printf("AGC gain:           %ld (%ld%%)\r\n", agc_gain, (agc_gain * 100) / 256);
-//		xil_printf("After AGC:          %ld\r\n", agc_signal);
 		xil_printf("After input limit:  %ld (threshold: %d)\r\n", limited_signal, INPUT_LIMIT_THRESHOLD);
-//		xil_printf("After delay:        %ld\r\n", mixed_signal);
 		xil_printf("After output limit: %ld (threshold: %d)\r\n", output_signal, OUTPUT_LIMIT_THRESHOLD);
 		xil_printf("PWM sample:         %ld\r\n", pwm_sample);
 		xil_printf("Delay: enabled=%d, samples=%lu\r\n", delay_enabled, delay_samples);

@@ -14,7 +14,7 @@
 #define NUM_INPUT_SAMPLES 5
 
 #define HP_FILTER_COEFF  1 // range from 0-256, higher = less filtering, lower = more filtering
-#define LP_FILTER_COEFF 10
+#define LP_FILTER_COEFF 75
 
 #define AGC_THRESHOLD 350 // lower = more aggressive gain reduction
 #define AGC_MIN_GAIN 64 // prevents complete silence
