@@ -1,7 +1,7 @@
 #include "bsp.h"
 #include "delay.h"
 #include "encoder.h"
-#include "effects.h"
+#include "tremolo.h"
 #include "xil_printf.h"
 
 XIntc sys_intc;
@@ -46,6 +46,9 @@ void BSP_init() {
 	init_enc_gpio();
 	init_pwm_timer();
 	init_sampling_timer();
+	
+	// Initialize tremolo effect
+	tremolo_init();
 }
 
 // samples are grabbed from the streamer at 48828.125 Hz, so need to modify this sampling ISR to grab data at the same frequency
