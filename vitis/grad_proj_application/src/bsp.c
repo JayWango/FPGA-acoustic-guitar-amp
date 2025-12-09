@@ -1,6 +1,7 @@
 #include "bsp.h"
 #include "delay.h"
 #include "encoder.h"
+#include "effects.h"
 #include "xil_printf.h"
 
 XIntc sys_intc;
@@ -41,6 +42,9 @@ void BSP_init() {
 	init_enc_gpio();
 	init_pwm_timer();
 	init_sampling_timer();
+	
+	// Initialize effects
+	effects_init();
 }
 
 // samples are grabbed from the streamer at 48.125 kHz, so need to modify this sampling ISR to grab data at the same frequency
@@ -204,8 +208,19 @@ void sampling_ISR() {
     	write_head = (write_head + 1) % BUFFER_SIZE;
     }
 
+    // ============================================================================
+    // APPLY EFFECTS (in order: Chorus -> Tremolo -> Bass Boost -> Reverb)
+    // ============================================================================
+    int32_t effect_signal = mixed_signal;
+    
+    // Process effects in chain order
+    effect_signal = process_chorus(effect_signal);
+    effect_signal = process_tremolo(effect_signal);
+    effect_signal = process_bass_boost(effect_signal);
+    effect_signal = process_reverb(effect_signal);
+
     // OUTPUT LIMITER
-    int32_t output_signal = mixed_signal;
+    int32_t output_signal = effect_signal;
     if (output_signal > OUTPUT_LIMIT_THRESHOLD) {
     	output_signal = OUTPUT_LIMIT_THRESHOLD;
     } else if (output_signal < -OUTPUT_LIMIT_THRESHOLD) {
@@ -317,23 +332,11 @@ void pushBtn_ISR(void *CallbackRef) {
 
     else if ((time_between_press > DEBOUNCE_TIME) && (btn_val & BTN_TOP)) {
         btn_prev_press_time = btn_curr_press_time;
-        // Button 0: Toggle delay effect on/off
+        // Button 0 (BTN_TOP): Toggle delay effect on/off
         delay_enabled = !delay_enabled;
         if (delay_enabled) {
-            // Recalculate read_head when enabling delay
-            // Ensure read_head is valid (within buffer bounds)
             read_head = (write_head - delay_samples + BUFFER_SIZE) % BUFFER_SIZE;
-
-//            // Debug: Print buffer state
             xil_printf("Delay ON: %lu samples (~%lu ms)\r\n", delay_samples, (delay_samples * 1000) / 48000);
-//            xil_printf("  write_head: %lu, samples_written: %lu\r\n", write_head, samples_written);
-//            if (samples_written > delay_samples) {
-//                u32 calc_read = (write_head - delay_samples + BUFFER_SIZE) % BUFFER_SIZE;
-//                xil_printf("  calculated read_head: %lu, delayed_signal: %ld\r\n",
-//                           calc_read, (int32_t)circular_buffer[calc_read]);
-//            } else {
-//                xil_printf("  Buffer filling... need %lu more samples\r\n", delay_samples - samples_written);
-//            }
         } else {
             xil_printf("Delay OFF\r\n");
         }
@@ -341,12 +344,47 @@ void pushBtn_ISR(void *CallbackRef) {
 
 	else if ((time_between_press > DEBOUNCE_TIME) && (btn_val & BTN_LEFT)) {
 		btn_prev_press_time = btn_curr_press_time;
-		xil_printf("btn left press\r\n");
+		// Button 1 (BTN_LEFT): Toggle Chorus effect
+		chorus_enabled = !chorus_enabled;
+		if (chorus_enabled) {
+			xil_printf("Chorus ON: delay=%lu samples, rate=%lu\r\n", chorus_delay_samples, chorus_lfo_rate);
+		} else {
+			xil_printf("Chorus OFF\r\n");
+		}
 	}
 
 	else if ((time_between_press > DEBOUNCE_TIME) && (btn_val & BTN_BOTTOM)) {
 		btn_prev_press_time = btn_curr_press_time;
-		xil_printf("btn bottom press\r\n");
+		// Button 2 (BTN_BOTTOM): Toggle Tremolo effect
+		tremolo_enabled = !tremolo_enabled;
+		if (tremolo_enabled) {
+			update_tremolo_phase_inc();  // Calculate phase increment when enabling tremolo
+			xil_printf("Tremolo ON: rate=%lu, depth=%lu\r\n", tremolo_rate, tremolo_depth);
+		} else {
+			xil_printf("Tremolo OFF\r\n");
+		}
+	}
+	
+	else if ((time_between_press > DEBOUNCE_TIME) && (btn_val & BTN_RIGHT)) {
+		btn_prev_press_time = btn_curr_press_time;
+		// Button 3 (BTN_RIGHT): Toggle Bass Boost effect
+		bass_boost_enabled = !bass_boost_enabled;
+		if (bass_boost_enabled) {
+			xil_printf("Bass Boost ON: gain=%lu\r\n", bass_boost_gain);
+		} else {
+			xil_printf("Bass Boost OFF\r\n");
+		}
+	}
+	
+	else if ((time_between_press > DEBOUNCE_TIME) && (btn_val & BTN_MIDDLE)) {
+		btn_prev_press_time = btn_curr_press_time;
+		// Button 4 (BTN_MIDDLE): Toggle Reverb effect
+		reverb_enabled = !reverb_enabled;
+		if (reverb_enabled) {
+			xil_printf("Reverb ON: mix=%lu\r\n", reverb_mix);
+		} else {
+			xil_printf("Reverb OFF\r\n");
+		}
 	}
 
 	XGpio_InterruptClear(GpioPtr, XGPIO_IR_CH1_MASK);
@@ -364,10 +402,11 @@ void enc_ISR(void *CallbackRef) {
 	uint8_t ab = (A << 1) | B;
 	quad_step(ab);
 
+	// Encoder adjusts parameters for the currently enabled effect (priority order)
 	if (delay_enabled) {
-		/* Raise flags on completion */
+		// Button 0: Adjust delay time
 		if (s_saw_ccw) {
-			s_saw_ccw  = 0;
+			s_saw_ccw = 0;
 			delay_samples += DELAY_ADJUST_STEP;
 			if (delay_samples > DELAY_SAMPLES_MAX) {
 				delay_samples = DELAY_SAMPLES_MAX;
@@ -375,7 +414,6 @@ void enc_ISR(void *CallbackRef) {
 			read_head = (write_head - delay_samples + BUFFER_SIZE) % BUFFER_SIZE;
 			xil_printf("Delay: %lu samples (~%lu ms)\r\n", delay_samples, (delay_samples * 1000) / 48000);
 		}
-
 		if (s_saw_cw) {
 			s_saw_cw = 0;
 			if (delay_samples > DELAY_ADJUST_STEP) {
@@ -386,15 +424,95 @@ void enc_ISR(void *CallbackRef) {
 			read_head = (write_head - delay_samples + BUFFER_SIZE) % BUFFER_SIZE;
 			xil_printf("Delay: %lu samples (~%lu ms)\r\n", delay_samples, (delay_samples * 1000) / 48000);
 		}
-	} else {
-		if (s_saw_cw) {
-			s_saw_cw  = 0;
-			xil_printf("CW turn\r\n");
-		}
-
+	} else if (chorus_enabled) {
+		// Button 1: Adjust chorus LFO rate
 		if (s_saw_ccw) {
 			s_saw_ccw = 0;
-			xil_printf("CCW turn\r\n");
+			chorus_lfo_rate += 1;
+			if (chorus_lfo_rate > CHORUS_LFO_RATE_MAX) {
+				chorus_lfo_rate = CHORUS_LFO_RATE_MAX;
+			}
+			xil_printf("Chorus rate: %lu (~%.1f Hz)\r\n", chorus_lfo_rate, (chorus_lfo_rate * 0.1f));
+		}
+		if (s_saw_cw) {
+			s_saw_cw = 0;
+			if (chorus_lfo_rate > CHORUS_LFO_RATE_MIN) {
+				chorus_lfo_rate -= 1;
+			} else {
+				chorus_lfo_rate = CHORUS_LFO_RATE_MIN;
+			}
+			xil_printf("Chorus rate: %lu (~%.1f Hz)\r\n", chorus_lfo_rate, (chorus_lfo_rate * 0.1f));
+		}
+	} else if (tremolo_enabled) {
+		// Button 2: Adjust tremolo rate (modulation speed)
+		// CCW = slower (lower rate), CW = faster (higher rate)
+		if (s_saw_ccw) {
+			s_saw_ccw = 0;
+			if (tremolo_rate > TREMOLO_RATE_MIN) {
+				tremolo_rate -= 1;  // Slower rate (smaller step for finer control)
+			} else {
+				tremolo_rate = TREMOLO_RATE_MIN;
+			}
+			update_tremolo_phase_inc();  // Recalculate phase increment (avoid division in ISR)
+			xil_printf("Tremolo rate: %lu (~%.1f Hz) - Slower\r\n", tremolo_rate, (tremolo_rate * 0.1f));
+		}
+		if (s_saw_cw) {
+			s_saw_cw = 0;
+			if (tremolo_rate < TREMOLO_RATE_MAX) {
+				tremolo_rate += 1;  // Faster rate
+			} else {
+				tremolo_rate = TREMOLO_RATE_MAX;  // Clamp at max
+			}
+			update_tremolo_phase_inc();  // Recalculate phase increment (avoid division in ISR)
+			xil_printf("Tremolo rate: %lu (max=%lu) - Faster\r\n", tremolo_rate, TREMOLO_RATE_MAX);
+		}
+	} else if (bass_boost_enabled) {
+		// Button 3: Adjust bass boost gain
+		if (s_saw_ccw) {
+			s_saw_ccw = 0;
+			bass_boost_gain += 8;
+			if (bass_boost_gain > BASS_BOOST_GAIN_MAX) {
+				bass_boost_gain = BASS_BOOST_GAIN_MAX;
+			}
+			xil_printf("Bass boost: %lu (+%.1f dB)\r\n", bass_boost_gain, ((bass_boost_gain - 128) * 6.0f) / 128.0f);
+		}
+		if (s_saw_cw) {
+			s_saw_cw = 0;
+			if (bass_boost_gain > BASS_BOOST_GAIN_MIN) {
+				bass_boost_gain -= 8;
+			} else {
+				bass_boost_gain = BASS_BOOST_GAIN_MIN;
+			}
+			xil_printf("Bass boost: %lu (+%.1f dB)\r\n", bass_boost_gain, ((bass_boost_gain - 128) * 6.0f) / 128.0f);
+		}
+	} else if (reverb_enabled) {
+		// Button 4: Adjust reverb mix
+		if (s_saw_ccw) {
+			s_saw_ccw = 0;
+			reverb_mix += 8;
+			if (reverb_mix > REVERB_MIX_MAX) {
+				reverb_mix = REVERB_MIX_MAX;
+			}
+			xil_printf("Reverb mix: %lu (%lu%%)\r\n", reverb_mix, (reverb_mix * 100) / 256);
+		}
+		if (s_saw_cw) {
+			s_saw_cw = 0;
+			if (reverb_mix > REVERB_MIX_MIN) {
+				reverb_mix -= 8;
+			} else {
+				reverb_mix = REVERB_MIX_MIN;
+			}
+			xil_printf("Reverb mix: %lu (%lu%%)\r\n", reverb_mix, (reverb_mix * 100) / 256);
+		}
+	} else {
+		// No effect enabled - just print rotation
+		if (s_saw_cw) {
+			s_saw_cw = 0;
+			xil_printf("CW turn (no effect enabled)\r\n");
+		}
+		if (s_saw_ccw) {
+			s_saw_ccw = 0;
+			xil_printf("CCW turn (no effect enabled)\r\n");
 		}
 	}
 
