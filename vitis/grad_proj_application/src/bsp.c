@@ -12,8 +12,8 @@ XTmrCtr pwm_tmr; // axi_timer_1
 
 // variables for delay
 volatile u32 circular_buffer[BUFFER_SIZE] = {0};
-volatile u32 read_head = READ_START;
 volatile u32 write_head = 0;
+volatile u32 curr_read_head = 0;
 volatile u8 delay_enabled = 0;
 volatile u32 delay_samples = DELAY_SAMPLES_DEFAULT;
 volatile u32 samples_written = 0;
@@ -59,22 +59,27 @@ void sampling_ISR() {
 	Xil_Out32(XPAR_MIC_BLOCK_STREAM_GRABBER_0_BASEADDR + 4, 0);
 	int32_t new_sample = (int32_t) Xil_In32(XPAR_MIC_BLOCK_STREAM_GRABBER_0_BASEADDR + 8);
 
+	// tiny_buffer holds the most recent 5 samples, which is used to calculate a rolling average
 	tiny_buffer[tiny_buffer_index] = new_sample;
 	tiny_buffer_index = (tiny_buffer_index + 1) % 5;
 
-	// calculate Average immediately (Don't wait!)
-	int32_t sum = 0;
-	for (int i = 0; i < 5; i++) {
-		sum += tiny_buffer[i];
-	}
-	// Update global variable with the SMOOTHED value
-	curr_sample = sum / 5;
-
     // set first sample from mic as the dc_bias
     if (first_run) {
-        dc_bias_static = curr_sample;
+		for(int i=0; i<5; i++) tiny_buffer[i] = new_sample;
+        dc_bias_static = new_sample;
+		dc_bias_drift = new_sample;
+		curr_sample = new_sample; 
         first_run = 0;
     }
+	else {
+		// calculate average immediately
+		int32_t sum = 0;
+		for (int i = 0; i < 5; i++) {
+			sum += tiny_buffer[i];
+		}
+		// Update global variable with the SMOOTHED value
+		curr_sample = sum / 5;
+	}
 
     // moving average of the dc_bias to track it
     dc_bias_drift += (curr_sample - dc_bias_drift) >> 10;
@@ -87,6 +92,7 @@ void sampling_ISR() {
 
     // HIGH-PASS FILTER (removes low-frequency rumble)
     hp_filter_state = hp_filter_state + ((audio_signal - hp_filter_state) * HP_FILTER_COEFF >> 8);
+	// HPF = original signal - LPF; hp_filter_state is the LPF and subtracting it from 'audio_signal' returns the actual HPF signal
     int32_t filtered_signal = audio_signal - hp_filter_state;
 
     // two cascaded LPF filter to remove high frequency squeals
@@ -95,13 +101,11 @@ void sampling_ISR() {
 
     // now that we preserve the sign, we can shift safely
 	// scale the signal down to a nice number ideally between -1024 and 1024
-//    int32_t scaled_signal = audio_signal >> 16; // change num back to 15 if it sounds bad
+    // int32_t scaled_signal = audio_signal >> 16; // change num back to 15 if it sounds bad
     int32_t scaled_signal = lp_filter_state_2 >> 17;
 
-    //int32_t scaled_signal_before_agc = scaled_signal;
-
-    // AUTOMATIC GAIN CONTROL (prevents feedback)
-    // Detect input level and reduce gain when input is loud
+    // AUTOMATIC GAIN CONTROL (prevents feedback) - currently not used
+    // get the absolute value of scaled signal
     int32_t input_level = (scaled_signal < 0) ? -scaled_signal : scaled_signal;
     // Calculate gain reduction when input exceeds threshold
     if (input_level > AGC_THRESHOLD) {
@@ -128,8 +132,10 @@ void sampling_ISR() {
     // int32_t gain_signal = (scaled_signal * agc_gain) >> 8;
 
     // INPUT LIMITER (prevents clipping in processing chain)
-    // Soft limiter: compress signal above threshold
+    // Soft limiter: compress signal above threshold, which enables "soft clipping" (sounds better than maxing out the signal)
     //int32_t limited_signal = gain_signal;
+
+	// JW Note: on Wed, we should print out scaled_signal at a fast rate to see how we can set a good INPUT LIMIT THRESHOLD
     int32_t limited_signal = scaled_signal;
     if (limited_signal > INPUT_LIMIT_THRESHOLD) {
         // Soft compression: threshold + (excess / 4)
@@ -151,20 +157,16 @@ void sampling_ISR() {
         // Need at least delay_samples worth of data in buffer
         if (samples_written > delay_samples) {
             // Calculate read_head dynamically based on current write_head and delay_samples
-            // This ensures read_head always points to data written delay_samples ago
+            // This ensures 'read_head' always points to data written 'delay_samples' ago
             // We calculate it here in the ISR to avoid race conditions
-            u32 current_read_head = (write_head - delay_samples + BUFFER_SIZE) % BUFFER_SIZE;
+            curr_read_head = (write_head - delay_samples + BUFFER_SIZE) % BUFFER_SIZE;
 
-            // Read delayed sample from circular buffer
-            int32_t delayed_signal = (int32_t)circular_buffer[current_read_head];
+            int32_t delayed_signal = (int32_t)circular_buffer[curr_read_head];
 
             // Mix dry (current) and wet (delayed) signals
             int32_t dry_mixed = (limited_signal * DRY_MIX) >> 8;
             int32_t wet_mixed = (delayed_signal * WET_MIX) >> 8;
             mixed_signal = dry_mixed + wet_mixed;
-
-            // Update read_head for tracking
-            read_head = current_read_head;
         }
     }
 
@@ -172,14 +174,14 @@ void sampling_ISR() {
     	mixed_signal = process_tremolo(mixed_signal);
     }
 
-    // OUTPUT LIMITER
-    int32_t output_signal = mixed_signal;
-    if (output_signal > OUTPUT_LIMIT_THRESHOLD) {
-    	output_signal = OUTPUT_LIMIT_THRESHOLD;
-    }
-    else if (output_signal < -OUTPUT_LIMIT_THRESHOLD) {
-    	output_signal = -OUTPUT_LIMIT_THRESHOLD;
-    }
+    // OUTPUT LIMITER -- i believe this is redundant
+    // int32_t output_signal = mixed_signal;
+    // if (output_signal > OUTPUT_LIMIT_THRESHOLD) {
+    // 	output_signal = OUTPUT_LIMIT_THRESHOLD;
+    // }
+    // else if (output_signal < -OUTPUT_LIMIT_THRESHOLD) {
+    // 	output_signal = -OUTPUT_LIMIT_THRESHOLD;
+    // }
 
     // re-center for PWM (unsigned output between 0 to 2048)
     // we add the mid-point of the PWM ticks (2048/2 = 1024) to turn the signed AC wave into a positive DC wave
@@ -230,9 +232,6 @@ void pushBtn_ISR(void *CallbackRef) {
         btn_prev_press_time = btn_curr_press_time;
         delay_enabled = !delay_enabled;
         if (delay_enabled) {
-            // Recalculate read_head when enabling delay
-            // Ensure read_head is valid (within buffer bounds)
-            read_head = (write_head - delay_samples + BUFFER_SIZE) % BUFFER_SIZE;
             xil_printf("Delay ON: %lu samples (~%lu ms)\r\n", delay_samples, (delay_samples * 1000) / 48000);
         }
         else {
@@ -274,7 +273,6 @@ void enc_ISR(void *CallbackRef) {
 			if (delay_samples > DELAY_SAMPLES_MAX) {
 				delay_samples = DELAY_SAMPLES_MAX;
 			}
-			read_head = (write_head - delay_samples + BUFFER_SIZE) % BUFFER_SIZE;
 			xil_printf("Delay: %lu samples (~%lu ms)\r\n", delay_samples, (delay_samples * 1000) / 48000);
 		}
 
@@ -285,7 +283,6 @@ void enc_ISR(void *CallbackRef) {
 			} else {
 				delay_samples = DELAY_SAMPLES_MIN;
 			}
-			read_head = (write_head - delay_samples + BUFFER_SIZE) % BUFFER_SIZE;
 			xil_printf("Delay: %lu samples (~%lu ms)\r\n", delay_samples, (delay_samples * 1000) / 48000);
 		}
 	}
