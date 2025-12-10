@@ -19,7 +19,7 @@
 #define TREMOLO_DEPTH_DEFAULT     256   // 100% depth default
 
 // Sample rate (Hz)
-#define TREMOLO_SAMPLE_RATE       48000
+#define TREMOLO_SAMPLE_RATE       48828 // switch back to 48000 if something breaks
 
 // Sine table size (must be power of 2 for efficient wrapping)
 #define TREMOLO_SINE_TABLE_SIZE   256

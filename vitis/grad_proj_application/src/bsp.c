@@ -242,7 +242,7 @@ void pushBtn_ISR(void *CallbackRef) {
 		btn_prev_press_time = btn_curr_press_time;
 		tremolo_enabled = !tremolo_enabled;
 		if (tremolo_enabled) {
-			update_tremolo_phase_inc();
+			// update_tremolo_phase_inc(); // note jw: try removing this to see if performance is changed; no need to update tremolo phase here?
 			xil_printf("Tremolo ON: rate=%lu, depth=%lu\r\n", tremolo_rate, tremolo_depth);
 		}
 		else {

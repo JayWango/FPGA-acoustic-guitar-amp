@@ -8,7 +8,7 @@
 // Pre-computed sine table for LFO generation
 // Values range from 0 to 255 (8-bit), representing 0 to 2π
 // This gives us smooth tremolo modulation without expensive sine calculations
-
+// this table was generated using the formula: sine_table[i] = 128 + 127 * sin ((i * 2pi) / 256)
 static const uint8_t sine_table[TREMOLO_SINE_TABLE_SIZE] = {
     128, 131, 134, 137, 140, 143, 146, 149, 152, 155, 158, 161, 164, 167, 170, 173,
     176, 179, 182, 185, 187, 190, 193, 195, 198, 201, 203, 206, 208, 210, 213, 215,
@@ -43,7 +43,7 @@ static volatile uint32_t tremolo_phase_inc = 0;        // Phase increment per sa
 // ============================================================================
 // PHASE INCREMENT CALCULATION
 // ============================================================================
-
+// determines the speed of tremolo effect; tremolo_phase_inc is a number within range 1-9
 void update_tremolo_phase_inc(void) {
     // Calculate phase increment per sample
     // tremolo_rate is in units of 0.1 Hz (e.g., 10 = 1.0 Hz)
@@ -53,7 +53,7 @@ void update_tremolo_phase_inc(void) {
 
     // Use 64-bit math to avoid overflow, then scale by 256 for fractional precision
     uint64_t numerator = (uint64_t)tremolo_rate * TREMOLO_SINE_TABLE_SIZE * 256;
-    uint64_t denominator = (uint64_t)TREMOLO_SAMPLE_RATE * 10;
+    uint64_t denominator = (uint64_t) TREMOLO_SAMPLE_RATE * 10;
     uint64_t result = numerator / denominator;
 
     tremolo_phase_inc = (uint32_t)result;
@@ -67,25 +67,21 @@ void update_tremolo_phase_inc(void) {
 // ============================================================================
 // TREMOLO PROCESSING
 // ============================================================================
-
 int32_t process_tremolo(int32_t input) {
-    if (!tremolo_enabled) {
-        return input;
-    }
-
     // Update LFO phase with fractional precision
     // tremolo_phase_inc is scaled by 256, so we accumulate it
     tremolo_lfo_phase += tremolo_phase_inc;
 
-    // Extract integer phase index from upper bits (divide by 256)
-    // The mask ensures we wrap at table size
+    // Extract integer phase index from index ranged between 0 to 255
+    // The mask ensures we wrap at table size; for example, 256 & 255 = 0
+    // this line is the same as: phase_index = (tremolo_lfo_phase / 256) % TREMOLO_SINE_TABLE_SIZE
     uint32_t phase_index = (tremolo_lfo_phase >> 8) & (TREMOLO_SINE_TABLE_SIZE - 1);
 
     // Reset accumulator when it exceeds one full cycle to prevent overflow
-    // One full cycle = TREMOLO_SINE_TABLE_SIZE * 256
-    if (tremolo_lfo_phase >= ((uint32_t)TREMOLO_SINE_TABLE_SIZE * 256)) {
-        // Keep only the fractional part and current phase
-        tremolo_lfo_phase = (phase_index << 8) | (tremolo_lfo_phase & 0xFF);
+    // One full cycle = TREMOLO_SINE_TABLE_SIZE * 256 = 65536 
+    if (tremolo_lfo_phase >= ((uint32_t) TREMOLO_SINE_TABLE_SIZE * 256)) {
+        // keep all values between 0 to 65535
+        tremolo_lfo_phase &= 0xFFFF;
     }
 
     // Look up sine value from table (0-255 range, centered at 128)
@@ -108,27 +104,22 @@ int32_t process_tremolo(int32_t input) {
     // Formula: gain = min_gain + (sine_value - 128) * tremolo_depth / 127
     // But we need to handle the case when sine < 128 (negative part of wave)
 
-    int32_t sine_offset = (int32_t)lfo_raw - 128;  // Range: -127 to +127
+    int32_t sine_offset = (int32_t) lfo_raw - 128;  // Range: -127 to +127
     uint32_t base_gain = 256 - tremolo_depth;
 
     // Calculate modulation: sine_offset * tremolo_depth / 127
     // Use fixed-point math: multiply first, then divide
-    int32_t modulation = (sine_offset * (int32_t)tremolo_depth) / 127;
+    // int32_t modulation = (sine_offset * (int32_t) tremolo_depth) / 127;
+    int32_t modulation = (sine_offset * (int32_t) tremolo_depth) >> 7;
 
     // Add modulation to base gain
-    int32_t total_gain = (int32_t)base_gain + modulation;
+    int32_t total_gain = (int32_t) base_gain + modulation;
 
     // Clamp gain to valid range (1 to 256)
     if (total_gain > 256) total_gain = 256;
     if (total_gain < 1) total_gain = 1;
 
-    int32_t input_abs = (input < 0) ? -input : input;
-    const int32_t NOISE_FLOOR = 1;
-    if (input_abs < NOISE_FLOOR) {
-    	return input;
-    }
-
-    // Apply gain to input signal
+    // Apply gain to input signal to modulate the input signal's amplitude (volume)
     // Scale by total_gain (1-256 range) and divide by 256
     int32_t output = (input * total_gain) >> 8;
 
@@ -138,7 +129,6 @@ int32_t process_tremolo(int32_t input) {
 // ============================================================================
 // INITIALIZATION
 // ============================================================================
-
 void init_tremolo(void) {
     tremolo_enabled = 0;
     tremolo_rate = TREMOLO_RATE_DEFAULT;
