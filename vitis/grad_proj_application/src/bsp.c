@@ -25,7 +25,6 @@ static int32_t dc_bias_drift = 0;
 static int32_t dc_bias_static = 0;
 static int first_run = 1; // just a simple flag
 static int32_t hp_filter_state = 0;
-static int32_t hp_filter_state_2 = 0;
 static int32_t lp_filter_state = 0;
 static int32_t lp_filter_state_2 = 0;
 static int32_t lp_filter_state_3 = 0;
