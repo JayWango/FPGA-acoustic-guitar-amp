@@ -8,7 +8,7 @@
 // Pre-computed sine table for LFO generation
 // Values range from 0 to 255 (8-bit), representing 0 to 2π
 // This gives us smooth tremolo modulation without expensive sine calculations
-// this table was generated using the formula: sine_table[i] = 128 + 127 * sin ((i * 2pi) / 256)
+// this table was generated using the formula: sine_table[i] = 128 + 127 * sin ((i * 2pi) / 256); essentially maps index i to a value between 0-255
 const uint8_t sine_table[TREMOLO_SINE_TABLE_SIZE] = {
     128, 131, 134, 137, 140, 143, 146, 149, 152, 155, 158, 161, 164, 167, 170, 173,
     176, 179, 182, 185, 187, 190, 193, 195, 198, 201, 203, 206, 208, 210, 213, 215,

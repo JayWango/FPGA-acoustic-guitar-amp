@@ -6,13 +6,11 @@
 // ============================================================================
 // CHORUS STATE VARIABLES
 // ============================================================================
-
 volatile u8 chorus_enabled = 0;
 volatile u32 chorus_rate = CHORUS_RATE_DEFAULT;
 volatile u32 chorus_delay = CHORUS_DELAY_DEFAULT;
 volatile u32 chorus_depth = CHORUS_DEPTH_DEFAULT;
 volatile u8 chorus_adjust_mode = 0;
-
 
 // Internal state (not exposed externally)
 static volatile uint32_t chorus_lfo_phase = 0;        // LFO phase accumulator (0 to TREMOLO_SINE_TABLE_SIZE-1)
@@ -21,7 +19,8 @@ static volatile uint32_t chorus_phase_inc = 0;        // Phase increment per sam
 // ============================================================================
 // PHASE INCREMENT CALCULATION
 // ============================================================================
-// determines the speed of chorus modulation; chorus_phase_inc is a number within range 1-9
+// determines the speed of chorus modulation by controlling how fast you step through the sine table
+// chorus_phase_inc is a number within range 1-9
 void update_chorus_phase_inc(void) {
     // Calculate phase increment per sample
     // chorus_rate is in units of 0.1 Hz (e.g., 10 = 1.0 Hz)
@@ -31,13 +30,15 @@ void update_chorus_phase_inc(void) {
     // Note: Using shared sine table from tremolo.h
 
     // Use 64-bit math to avoid overflow, then scale by 256 for fractional precision
-    uint64_t numerator = (uint64_t)chorus_rate * TREMOLO_SINE_TABLE_SIZE * 256;
-    uint64_t denominator = (uint64_t) CHORUS_SAMPLE_RATE * 10;
+    // SINE_TABLE_SIZE / 48828 = 0.0052 indices per sample, which is too slow, so we need to scale by the rate and another 256
+    uint64_t numerator = (uint64_t) chorus_rate * TREMOLO_SINE_TABLE_SIZE * 256;
+    uint64_t denominator = (uint64_t) CHORUS_SAMPLE_RATE * 10; 
     uint64_t result = numerator / denominator;
 
     chorus_phase_inc = (uint32_t)result;
 
     // Ensure minimum phase increment to prevent LFO from getting stuck
+    // if chorus_rate = 1, then chorus_phase_inc is truncated to 0
     if (chorus_phase_inc == 0 && chorus_rate > 0) {
         chorus_phase_inc = 1;  // Minimum increment (scaled by 256)
     }
@@ -48,19 +49,19 @@ void update_chorus_phase_inc(void) {
 // ============================================================================
 int32_t process_chorus(int32_t input, volatile u32* buffer, u32 buffer_size, u32 write_head) {
     // Update LFO phase with fractional precision
-    // chorus_phase_inc is scaled by 256, so we accumulate it
+    // chorus_phase_inc is scaled by 256, so we accumulate it; this variable ranges from 0 to 65536
     chorus_lfo_phase += chorus_phase_inc;
 
     // Extract integer phase index from index ranged between 0 to 255
     // The mask ensures we wrap at table size; for example, 256 & 255 = 0
     // this line is the same as: phase_index = (chorus_lfo_phase / 256) % TREMOLO_SINE_TABLE_SIZE
-    // Note: Using shared sine table from tremolo.h
+    // Note: Using shared sine table from tremolo.h and dividing by 2^8 is necessary to index into the sine table at the proper rate
     uint32_t phase_index = (chorus_lfo_phase >> 8) & (TREMOLO_SINE_TABLE_SIZE - 1);
 
     // Reset accumulator when it exceeds one full cycle to prevent overflow
     // One full cycle = TREMOLO_SINE_TABLE_SIZE * 256 = 65536
     if (chorus_lfo_phase >= ((uint32_t) TREMOLO_SINE_TABLE_SIZE * 256)) {
-        // keep all values between 0 to 65535
+        // keep all values between 0 to 65535 if there is some overflow
         chorus_lfo_phase &= 0xFFFF;
     }
 
@@ -82,7 +83,7 @@ int32_t process_chorus(int32_t input, volatile u32* buffer, u32 buffer_size, u32
 
     // Calculate modulation: sine_offset * chorus_depth / 127
     // Use fixed-point math: multiply first, then divide
-    int32_t delay_modulation = (sine_offset * (int32_t) chorus_depth) >> 7;
+    int32_t delay_modulation = (sine_offset * (int32_t) chorus_depth) >> 7; // range: -chorus_depth to chorus_depth
 
     // Calculate modulated delay
     int32_t modulated_delay = (int32_t) chorus_delay + delay_modulation;

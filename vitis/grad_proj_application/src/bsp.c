@@ -90,9 +90,11 @@ void sampling_ISR() {
 
     // moving average of the dc_bias to track it
     dc_bias_drift += (curr_sample - dc_bias_drift) >> 10;
-    if ((dc_bias_drift > curr_sample + 1000000) || (dc_bias_drift < curr_sample - 1000000)) {
-    	dc_bias_drift = dc_bias_static;
-    }
+
+	// test to see if removing this drift tracker fixes 'clap' mic blowout issue
+    // if ((dc_bias_drift > curr_sample + 1000000) || (dc_bias_drift < curr_sample - 1000000)) {
+    // 	dc_bias_drift = dc_bias_static;
+    // }
 
     // remove the DC offset from the current sample
     int32_t audio_signal = curr_sample - dc_bias_drift;
@@ -131,6 +133,8 @@ void sampling_ISR() {
     write_head = (write_head + 1) % BUFFER_SIZE;
 
     int32_t mixed_signal = limited_signal;
+
+	// need to check if samples_written > delay_samples to avoid reading junk data
     if (delay_enabled && (samples_written > delay_samples)) {
     	mixed_signal = process_delay(mixed_signal, circular_buffer, BUFFER_SIZE, write_head);
     }
@@ -201,7 +205,7 @@ void pushBtn_ISR(void *CallbackRef) {
         btn_prev_press_time = btn_curr_press_time;
         delay_enabled = !delay_enabled;
         if (delay_enabled) {
-            xil_printf("Delay ON: %lu samples (~%lu ms)\r\n", delay_samples, (delay_samples * 1000) / 48000);
+            xil_printf("Delay ON: %lu samples (~%lu ms)\r\n", delay_samples, (delay_samples * 1000) / 48828);
         }
         else {
             xil_printf("Delay OFF\r\n");
@@ -274,7 +278,7 @@ void enc_ISR(void *CallbackRef) {
 			if (delay_samples > DELAY_SAMPLES_MAX) {
 				delay_samples = DELAY_SAMPLES_MAX;
 			}
-			xil_printf("Delay: %lu samples (~%lu ms)\r\n", delay_samples, (delay_samples * 1000) / 48000);
+			xil_printf("Delay: %lu samples (~%lu ms)\r\n", delay_samples, (delay_samples * 1000) / 48828);
 		}
 
 		if (s_saw_cw) {
@@ -284,7 +288,7 @@ void enc_ISR(void *CallbackRef) {
 			} else {
 				delay_samples = DELAY_SAMPLES_MIN;
 			}
-			xil_printf("Delay: %lu samples (~%lu ms)\r\n", delay_samples, (delay_samples * 1000) / 48000);
+			xil_printf("Delay: %lu samples (~%lu ms)\r\n", delay_samples, (delay_samples * 1000) / 48828);
 		}
 	}
 	else if (tremolo_enabled) {
@@ -386,7 +390,7 @@ void enc_ISR(void *CallbackRef) {
 					chorus_delay = CHORUS_DELAY_MIN;
 				}
 				xil_printf("Chorus delay: %lu samples (~%lu ms) - Shorter\r\n",
-						   chorus_delay, (chorus_delay * 1000) / 48000);
+						   chorus_delay, (chorus_delay * 1000) / 48828);
 			}
 			if (s_saw_ccw) {
 				s_saw_ccw = 0;
@@ -399,7 +403,7 @@ void enc_ISR(void *CallbackRef) {
 					chorus_delay = CHORUS_DELAY_MAX;  // Clamp at max
 				}
 				xil_printf("Chorus delay: %lu samples (~%lu ms) - Longer\r\n",
-						   chorus_delay, (chorus_delay * 1000) / 48000);
+						   chorus_delay, (chorus_delay * 1000) / 48828);
 			}
 		}
 		else {
@@ -416,7 +420,7 @@ void enc_ISR(void *CallbackRef) {
 					chorus_depth = CHORUS_DEPTH_MIN;
 				}
 				xil_printf("Chorus depth: %lu samples (~%lu ms) - Less\r\n",
-						   chorus_depth, (chorus_depth * 1000) / 48000);
+						   chorus_depth, (chorus_depth * 1000) / 48828);
 			}
 			if (s_saw_ccw) {
 				s_saw_ccw = 0;
@@ -429,7 +433,7 @@ void enc_ISR(void *CallbackRef) {
 					chorus_depth = CHORUS_DEPTH_MAX;  // Clamp at max
 				}
 				xil_printf("Chorus depth: %lu samples (~%lu ms) - More\r\n",
-						   chorus_depth, (chorus_depth * 1000) / 48000);
+						   chorus_depth, (chorus_depth * 1000) / 48828);
 			}
 		}
 	}
@@ -526,10 +530,10 @@ void enc_ISR(void *CallbackRef) {
 						   chorus_rate / 10, chorus_rate % 10);
 			} else if (chorus_adjust_mode == 1) {
 				xil_printf("Chorus: Adjusting DELAY (current: %lu samples, ~%lu ms)\r\n",
-						   chorus_delay, (chorus_delay * 1000) / 48000);
+						   chorus_delay, (chorus_delay * 1000) / 48828);
 			} else {
 				xil_printf("Chorus: Adjusting DEPTH (current: %lu samples, ~%lu ms)\r\n",
-							chorus_depth, (chorus_depth * 1000) / 48000);
+							chorus_depth, (chorus_depth * 1000) / 48828);
 			}
 		}
 		else {

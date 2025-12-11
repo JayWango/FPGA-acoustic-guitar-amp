@@ -11,7 +11,7 @@
 // Chorus modulation rate range (in units of 0.1 Hz, so 10 = 1.0 Hz)
 #define CHORUS_RATE_MIN          1     // 0.1 Hz minimum
 #define CHORUS_RATE_MAX          50    // 5.0 Hz maximum
-#define CHORUS_RATE_DEFAULT      25    // 1.0 Hz default
+#define CHORUS_RATE_DEFAULT      25    // 2.5 Hz default
 
 // Chorus delay range (base delay in samples)
 #define CHORUS_DELAY_MIN         200   // ~2ms at 48kHz
@@ -35,8 +35,8 @@
 #define CHORUS_SINE_TABLE_SIZE   256   // Must match TREMOLO_SINE_TABLE_SIZE
 
 // Dry/wet mix ratios (0-256 scale)
-#define CHORUS_DRY_MIX           128    // 75% dry signal
-#define CHORUS_WET_MIX           128    // 25% wet signal
+#define CHORUS_DRY_MIX           128    // 50% dry signal
+#define CHORUS_WET_MIX           128    // 50% wet signal
 
 // ============================================================================
 // CHORUS STATE VARIABLES (extern for access from bsp.c)
