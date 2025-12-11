@@ -13,8 +13,24 @@
 #define RESET_VALUE 2048 // modify this to change frequency of sampling_ISR()
 #define NUM_INPUT_SAMPLES 5
 
-#define HP_FILTER_COEFF  10 // range from 0-256, higher = less filtering, lower = more filtering; previously was in a good working state at '1'
-#define LP_FILTER_COEFF 45 //at a coeff of 1, the LPF is very aggressive; you can blow into mic and hear sound, but can't hear higher pitches prev. 21
+// Filter coefficient ranges (0-256 scale)
+#define HP_FILTER_COEFF_MIN  1   // More filtering (removes more low frequencies)
+#define HP_FILTER_COEFF_MAX  50  // Less filtering (removes fewer low frequencies)
+#define HP_FILTER_COEFF_DEFAULT  10
+
+#define LP_FILTER_COEFF_MIN  1   // More filtering (removes more high frequencies)
+#define LP_FILTER_COEFF_MAX  100 // Less filtering (removes fewer high frequencies)
+#define LP_FILTER_COEFF_DEFAULT  45
+
+#define FILTER_COEFF_ADJUST_STEP  2  // Step size for encoder adjustment
+
+// Filter coefficients (adjustable via buttons)
+extern volatile u32 hp_filter_coeff;
+extern volatile u32 lp_filter_coeff;
+
+// Filter adjustment mode flags
+extern volatile u8 adjusting_hp_filter;
+extern volatile u8 adjusting_lp_filter;
 
 #define AGC_THRESHOLD 350 // lower = more aggressive gain reduction
 #define AGC_MIN_GAIN 32 // prevents complete silence

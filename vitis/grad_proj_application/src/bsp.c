@@ -16,6 +16,14 @@ volatile u32 circular_buffer[BUFFER_SIZE] = {0};
 volatile u32 write_head = 0;
 volatile u32 samples_written = 0;
 
+// Filter coefficients (adjustable)
+volatile u32 hp_filter_coeff = HP_FILTER_COEFF_DEFAULT;
+volatile u32 lp_filter_coeff = LP_FILTER_COEFF_DEFAULT;
+
+// Filter adjustment mode flags
+volatile u8 adjusting_hp_filter = 0;
+volatile u8 adjusting_lp_filter = 0;
+
 // variables used in sampling_ISR() for printing statistics and collecting the DC offset of the raw data
 volatile u32 sys_tick_counter = 0;
 volatile int32_t curr_sample = 0;
@@ -91,13 +99,13 @@ void sampling_ISR() {
     int32_t audio_signal = curr_sample - dc_bias_drift;
 
     // HIGH-PASS FILTER (removes low-frequency rumble)
-    hp_filter_state = hp_filter_state + ((audio_signal - hp_filter_state) * HP_FILTER_COEFF >> 8);
+    hp_filter_state = hp_filter_state + ((audio_signal - hp_filter_state) * hp_filter_coeff >> 8);
 	// HPF = original signal - LPF; hp_filter_state is the LPF and subtracting it from 'audio_signal' returns the actual HPF signal
     int32_t filtered_signal = audio_signal - hp_filter_state;
 
     // two cascaded LPF filter to remove high frequency squeals
-    lp_filter_state = lp_filter_state + ((filtered_signal - lp_filter_state) * LP_FILTER_COEFF >> 8);
-    lp_filter_state_2 = lp_filter_state_2 + ((lp_filter_state - lp_filter_state_2) * LP_FILTER_COEFF >> 8);
+    lp_filter_state = lp_filter_state + ((filtered_signal - lp_filter_state) * lp_filter_coeff >> 8);
+    lp_filter_state_2 = lp_filter_state_2 + ((lp_filter_state - lp_filter_state_2) * lp_filter_coeff >> 8);
 
     // now that we preserve the sign, we can shift safely
 	// scale the signal down to a nice number ideally between -1024 and 1024
@@ -253,6 +261,32 @@ void pushBtn_ISR(void *CallbackRef) {
 		}
 		else {
 			xil_printf("Chorus OFF\r\n");
+		}
+	}
+	else if ((time_between_press > DEBOUNCE_TIME) && (btn_val & BTN_LEFT)) {
+		btn_prev_press_time = btn_curr_press_time;
+		adjusting_hp_filter = !adjusting_hp_filter;
+		if (adjusting_hp_filter) {
+			adjusting_lp_filter = 0;  // Only one filter adjustment mode at a time
+			u32 cutoff_hz = (hp_filter_coeff * 3035) / 100;  // 30.4 * coeff
+			xil_printf("Adjusting HP Filter (coeff: %lu, cutoff: ~%lu Hz)\r\n", hp_filter_coeff, cutoff_hz);
+		}
+		else {
+			u32 cutoff_hz = (hp_filter_coeff * 3035) / 100;  // 30.4 * coeff
+			xil_printf("HP Filter adjustment OFF (coeff: %lu, cutoff: ~%lu Hz)\r\n", hp_filter_coeff, cutoff_hz);
+		}
+	}
+	else if ((time_between_press > DEBOUNCE_TIME) && (btn_val & BTN_RIGHT)) {
+		btn_prev_press_time = btn_curr_press_time;
+		adjusting_lp_filter = !adjusting_lp_filter;
+		if (adjusting_lp_filter) {
+			adjusting_hp_filter = 0;  // Only one filter adjustment mode at a time
+			u32 cutoff_hz = (lp_filter_coeff * 3035) / 100;  // 30.4 * coeff
+			xil_printf("Adjusting LP Filter (coeff: %lu, cutoff: ~%lu Hz)\r\n", lp_filter_coeff, cutoff_hz);
+		}
+		else {
+			u32 cutoff_hz = (lp_filter_coeff * 3035) / 100;  // 30.4 * coeff
+			xil_printf("LP Filter adjustment OFF (coeff: %lu, cutoff: ~%lu Hz)\r\n", lp_filter_coeff, cutoff_hz);
 		}
 	}
 
@@ -437,6 +471,74 @@ void enc_ISR(void *CallbackRef) {
 				xil_printf("Chorus depth: %lu samples (~%lu ms) - More\r\n", 
 				           chorus_depth, (chorus_depth * 1000) / 48000);
 			}
+		}
+	}
+	else if (adjusting_hp_filter) {
+		// Adjust HP filter coefficient
+		// CCW = more filtering (lower coeff), CW = less filtering (higher coeff)
+		// Cutoff frequency calculation: fc ≈ fs * coeff / (2π * 256)
+		// For fs = 48828 Hz: fc ≈ 48828 * coeff / (2π * 256) ≈ 30.4 * coeff Hz
+		if (s_saw_ccw) {
+			s_saw_ccw = 0;
+			if (hp_filter_coeff > HP_FILTER_COEFF_MIN) {
+				hp_filter_coeff -= FILTER_COEFF_ADJUST_STEP;
+				if (hp_filter_coeff < HP_FILTER_COEFF_MIN) {
+					hp_filter_coeff = HP_FILTER_COEFF_MIN;
+				}
+			} else {
+				hp_filter_coeff = HP_FILTER_COEFF_MIN;
+			}
+			// Calculate cutoff frequency: fc ≈ 30.4 * coeff (Hz)
+			u32 cutoff_hz = (hp_filter_coeff * 3035) / 100;  // 30.4 * coeff, scaled by 10 for integer math
+			xil_printf("HP Filter: %lu (cutoff: ~%lu Hz) - More filtering\r\n", hp_filter_coeff, cutoff_hz);
+		}
+		if (s_saw_cw) {
+			s_saw_cw = 0;
+			if (hp_filter_coeff < HP_FILTER_COEFF_MAX) {
+				hp_filter_coeff += FILTER_COEFF_ADJUST_STEP;
+				if (hp_filter_coeff > HP_FILTER_COEFF_MAX) {
+					hp_filter_coeff = HP_FILTER_COEFF_MAX;
+				}
+			} else {
+				hp_filter_coeff = HP_FILTER_COEFF_MAX;
+			}
+			// Calculate cutoff frequency: fc ≈ 30.4 * coeff (Hz)
+			u32 cutoff_hz = (hp_filter_coeff * 3035) / 100;  // 30.4 * coeff, scaled by 10 for integer math
+			xil_printf("HP Filter: %lu (cutoff: ~%lu Hz) - Less filtering\r\n", hp_filter_coeff, cutoff_hz);
+		}
+	}
+	else if (adjusting_lp_filter) {
+		// Adjust LP filter coefficient
+		// CCW = more filtering (lower coeff), CW = less filtering (higher coeff)
+		// Cutoff frequency calculation: fc ≈ fs * coeff / (2π * 256)
+		// For fs = 48828 Hz: fc ≈ 48828 * coeff / (2π * 256) ≈ 30.4 * coeff Hz
+		if (s_saw_ccw) {
+			s_saw_ccw = 0;
+			if (lp_filter_coeff > LP_FILTER_COEFF_MIN) {
+				lp_filter_coeff -= FILTER_COEFF_ADJUST_STEP;
+				if (lp_filter_coeff < LP_FILTER_COEFF_MIN) {
+					lp_filter_coeff = LP_FILTER_COEFF_MIN;
+				}
+			} else {
+				lp_filter_coeff = LP_FILTER_COEFF_MIN;
+			}
+			// Calculate cutoff frequency: fc ≈ 30.4 * coeff (Hz)
+			u32 cutoff_hz = (lp_filter_coeff * 3035) / 100;  // 30.4 * coeff, scaled by 10 for integer math
+			xil_printf("LP Filter: %lu (cutoff: ~%lu Hz) - More filtering\r\n", lp_filter_coeff, cutoff_hz);
+		}
+		if (s_saw_cw) {
+			s_saw_cw = 0;
+			if (lp_filter_coeff < LP_FILTER_COEFF_MAX) {
+				lp_filter_coeff += FILTER_COEFF_ADJUST_STEP;
+				if (lp_filter_coeff > LP_FILTER_COEFF_MAX) {
+					lp_filter_coeff = LP_FILTER_COEFF_MAX;
+				}
+			} else {
+				lp_filter_coeff = LP_FILTER_COEFF_MAX;
+			}
+			// Calculate cutoff frequency: fc ≈ 30.4 * coeff (Hz)
+			u32 cutoff_hz = (lp_filter_coeff * 3035) / 100;  // 30.4 * coeff, scaled by 10 for integer math
+			xil_printf("LP Filter: %lu (cutoff: ~%lu Hz) - Less filtering\r\n", lp_filter_coeff, cutoff_hz);
 		}
 	}
 	else {
