@@ -11,12 +11,9 @@ XGpio pushBtn;
 XTmrCtr sampling_tmr; // axi_timer_0
 XTmrCtr pwm_tmr; // axi_timer_1
 
-// variables for delay
+// variables for circular buffer
 volatile u32 circular_buffer[BUFFER_SIZE] = {0};
 volatile u32 write_head = 0;
-volatile u32 curr_read_head = 0;
-volatile u8 delay_enabled = 0;
-volatile u32 delay_samples = DELAY_SAMPLES_DEFAULT;
 volatile u32 samples_written = 0;
 
 // variables used in sampling_ISR() for printing statistics and collecting the DC offset of the raw data
@@ -46,6 +43,7 @@ void BSP_init() {
 	init_pwm_timer();
 	init_sampling_timer();
 
+	init_delay();
 	init_tremolo();
 	init_chorus();
 }
@@ -154,22 +152,8 @@ void sampling_ISR() {
     write_head = (write_head + 1) % BUFFER_SIZE;
 
     int32_t mixed_signal = limited_signal;
-    if (delay_enabled) {
-        // Only process delay if buffer has enough samples written
-        // Need at least delay_samples worth of data in buffer
-        if (samples_written > delay_samples) {
-            // Calculate read_head dynamically based on current write_head and delay_samples
-            // This ensures 'read_head' always points to data written 'delay_samples' ago
-            // We calculate it here in the ISR to avoid race conditions
-            curr_read_head = (write_head - delay_samples + BUFFER_SIZE) % BUFFER_SIZE;
-
-            int32_t delayed_signal = (int32_t)circular_buffer[curr_read_head];
-
-            // Mix dry (current) and wet (delayed) signals
-            int32_t dry_mixed = (limited_signal * DRY_MIX) >> 8;
-            int32_t wet_mixed = (delayed_signal * WET_MIX) >> 8;
-            mixed_signal = dry_mixed + wet_mixed;
-        }
+    if (delay_enabled && (samples_written > delay_samples)) {
+    	mixed_signal = process_delay(mixed_signal, circular_buffer, BUFFER_SIZE, write_head);
     }
 
     if (tremolo_enabled) {
@@ -244,7 +228,7 @@ void pushBtn_ISR(void *CallbackRef) {
             xil_printf("Delay OFF\r\n");
         }
     }
-	else if ((time_between_press > DEBOUNCE_TIME) && (btn_val & BTN_BOTTOM)) {
+	else if ((time_between_press > DEBOUNCE_TIME) && (btn_val & BTN_MIDDLE)) {
 		btn_prev_press_time = btn_curr_press_time;
 		tremolo_enabled = !tremolo_enabled;
 		if (tremolo_enabled) {
@@ -255,7 +239,7 @@ void pushBtn_ISR(void *CallbackRef) {
 			xil_printf("Tremolo OFF\r\n");
 		}
 	}
-	else if ((time_between_press > DEBOUNCE_TIME) && (btn_val & BTN_MIDDLE)) {
+	else if ((time_between_press > DEBOUNCE_TIME) && (btn_val & BTN_BOTTOM)) {
 		btn_prev_press_time = btn_curr_press_time;
 		chorus_enabled = !chorus_enabled;
 		if (chorus_enabled) {
@@ -359,27 +343,94 @@ void enc_ISR(void *CallbackRef) {
         }
 	}
 	else if (chorus_enabled) {
-		// Adjust chorus modulation rate (0.1-5 Hz)
-        if (s_saw_cw) {
-            s_saw_cw = 0;
-            if (chorus_rate > CHORUS_RATE_MIN) {
-                chorus_rate -= 1;  // Slower rate (smaller step for finer control)
-            } else {
-                chorus_rate = CHORUS_RATE_MIN;
-            }
-            update_chorus_phase_inc();  // Recalculate phase increment (avoid division in ISR)
-            xil_printf("Chorus rate: %lu.%lu Hz - Slower\r\n", chorus_rate / 10, chorus_rate % 10);
-        }
-        if (s_saw_ccw) {
-            s_saw_ccw = 0;
-            if (chorus_rate < CHORUS_RATE_MAX) {
-                chorus_rate += 1;  // Faster rate
-            } else {
-                chorus_rate = CHORUS_RATE_MAX;  // Clamp at max
-            }
-            update_chorus_phase_inc();  // Recalculate phase increment (avoid division in ISR)
-            xil_printf("Chorus rate: %lu.%lu Hz - Faster\r\n", chorus_rate / 10, chorus_rate % 10);
-        }
+		// Adjust chorus parameters based on chorus_adjust_mode
+		// Mode 0: Adjust rate (modulation speed)
+		// Mode 1: Adjust delay (base delay time)
+		// Mode 2: Adjust depth (modulation amount)
+		if (chorus_adjust_mode == 0) {
+			// Adjust chorus rate (modulation speed)
+			// CCW = slower (lower rate), CW = faster (higher rate)
+			if (s_saw_cw) {
+				s_saw_cw = 0;
+				if (chorus_rate > CHORUS_RATE_MIN) {
+					chorus_rate -= 1;  // Slower rate (smaller step for finer control)
+				} else {
+					chorus_rate = CHORUS_RATE_MIN;
+				}
+				update_chorus_phase_inc();  // Recalculate phase increment (avoid division in ISR)
+				xil_printf("Chorus rate: %lu.%lu Hz - Slower\r\n", chorus_rate / 10, chorus_rate % 10);
+			}
+			if (s_saw_ccw) {
+				s_saw_ccw = 0;
+				if (chorus_rate < CHORUS_RATE_MAX) {
+					chorus_rate += 1;  // Faster rate
+				} else {
+					chorus_rate = CHORUS_RATE_MAX;  // Clamp at max
+				}
+				update_chorus_phase_inc();  // Recalculate phase increment (avoid division in ISR)
+				xil_printf("Chorus rate: %lu.%lu Hz - Faster\r\n", chorus_rate / 10, chorus_rate % 10);
+			}
+		}
+		else if (chorus_adjust_mode == 1) {
+			// Adjust chorus delay (base delay time)
+			// CCW = shorter delay, CW = longer delay
+			if (s_saw_cw) {
+				s_saw_cw = 0;
+				if (chorus_delay > CHORUS_DELAY_MIN) {
+					chorus_delay -= CHORUS_DELAY_ADJUST_STEP;
+					if (chorus_delay < CHORUS_DELAY_MIN) {
+						chorus_delay = CHORUS_DELAY_MIN;
+					}
+				} else {
+					chorus_delay = CHORUS_DELAY_MIN;
+				}
+				xil_printf("Chorus delay: %lu samples (~%lu ms) - Shorter\r\n",
+						   chorus_delay, (chorus_delay * 1000) / 48000);
+			}
+			if (s_saw_ccw) {
+				s_saw_ccw = 0;
+				if (chorus_delay < CHORUS_DELAY_MAX) {
+					chorus_delay += CHORUS_DELAY_ADJUST_STEP;
+					if (chorus_delay > CHORUS_DELAY_MAX) {
+						chorus_delay = CHORUS_DELAY_MAX;
+					}
+				} else {
+					chorus_delay = CHORUS_DELAY_MAX;  // Clamp at max
+				}
+				xil_printf("Chorus delay: %lu samples (~%lu ms) - Longer\r\n",
+						   chorus_delay, (chorus_delay * 1000) / 48000);
+			}
+		}
+		else {
+			// Adjust chorus depth (modulation amount)
+			// CCW = less depth, CW = more depth
+			if (s_saw_cw) {
+				s_saw_cw = 0;
+				if (chorus_depth > CHORUS_DEPTH_MIN) {
+					chorus_depth -= CHORUS_DEPTH_ADJUST_STEP;
+					if (chorus_depth < CHORUS_DEPTH_MIN) {
+						chorus_depth = CHORUS_DEPTH_MIN;
+					}
+				} else {
+					chorus_depth = CHORUS_DEPTH_MIN;
+				}
+				xil_printf("Chorus depth: %lu samples (~%lu ms) - Less\r\n",
+						   chorus_depth, (chorus_depth * 1000) / 48000);
+			}
+			if (s_saw_ccw) {
+				s_saw_ccw = 0;
+				if (chorus_depth < CHORUS_DEPTH_MAX) {
+					chorus_depth += CHORUS_DEPTH_ADJUST_STEP;
+					if (chorus_depth > CHORUS_DEPTH_MAX) {
+						chorus_depth = CHORUS_DEPTH_MAX;
+					}
+				} else {
+					chorus_depth = CHORUS_DEPTH_MAX;  // Clamp at max
+				}
+				xil_printf("Chorus depth: %lu samples (~%lu ms) - More\r\n",
+						   chorus_depth, (chorus_depth * 1000) / 48000);
+			}
+		}
 	}
 	else {
 		if (s_saw_cw) {
@@ -404,6 +455,19 @@ void enc_ISR(void *CallbackRef) {
 			else {
 				xil_printf("Tremolo: Adjusting DEPTH (current: %lu%%)\r\n",
 						   (tremolo_depth * 100) / 256);
+			}
+		}
+		else if (chorus_enabled) {
+			chorus_adjust_mode = (chorus_adjust_mode + 1) % 3;  // Cycle through: rate, delay, depth
+			if (chorus_adjust_mode == 0) {
+				xil_printf("Chorus: Adjusting RATE (current: %lu.%lu Hz)\r\n",
+						   chorus_rate / 10, chorus_rate % 10);
+			} else if (chorus_adjust_mode == 1) {
+				xil_printf("Chorus: Adjusting DELAY (current: %lu samples, ~%lu ms)\r\n",
+						   chorus_delay, (chorus_delay * 1000) / 48000);
+			} else {
+				xil_printf("Chorus: Adjusting DEPTH (current: %lu samples, ~%lu ms)\r\n",
+							chorus_depth, (chorus_depth * 1000) / 48000);
 			}
 		}
 		else {

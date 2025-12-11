@@ -23,6 +23,10 @@
 #define CHORUS_DEPTH_MAX         300   // 4ms modulation
 #define CHORUS_DEPTH_DEFAULT     150    // 1ms modulation default // 120
 
+// Adjust step sizes for encoder
+#define CHORUS_DELAY_ADJUST_STEP 50
+#define CHORUS_DEPTH_ADJUST_STEP 10
+
 // Sample rate (Hz)
 #define CHORUS_SAMPLE_RATE       48828 // match system sample rate
 
@@ -42,6 +46,7 @@ extern volatile u8 chorus_enabled;      // Effect enable flag
 extern volatile u32 chorus_rate;        // LFO rate (in 0.1 Hz units)
 extern volatile u32 chorus_delay;       // Base delay (samples)
 extern volatile u32 chorus_depth;       // Modulation depth (samples)
+extern volatile u8 chorus_adjust_mode;	// 0 = rate, 1 = delay, 2 = depth
 
 // ============================================================================
 // FUNCTION PROTOTYPES

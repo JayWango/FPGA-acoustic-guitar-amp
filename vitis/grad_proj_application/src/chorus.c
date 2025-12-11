@@ -11,6 +11,8 @@ volatile u8 chorus_enabled = 0;
 volatile u32 chorus_rate = CHORUS_RATE_DEFAULT;
 volatile u32 chorus_delay = CHORUS_DELAY_DEFAULT;
 volatile u32 chorus_depth = CHORUS_DEPTH_DEFAULT;
+volatile u8 chorus_adjust_mode = 0;
+
 
 // Internal state (not exposed externally)
 static volatile uint32_t chorus_lfo_phase = 0;        // LFO phase accumulator (0 to TREMOLO_SINE_TABLE_SIZE-1)
@@ -112,6 +114,7 @@ void init_chorus(void) {
     chorus_rate = CHORUS_RATE_DEFAULT;
     chorus_delay = CHORUS_DELAY_DEFAULT;
     chorus_depth = CHORUS_DEPTH_DEFAULT;
+    chorus_adjust_mode = 0;
     chorus_lfo_phase = 0;
     update_chorus_phase_inc();
 }
