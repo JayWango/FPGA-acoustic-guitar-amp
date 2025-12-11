@@ -25,13 +25,20 @@ static int32_t dc_bias_drift = 0;
 static int32_t dc_bias_static = 0;
 static int first_run = 1; // just a simple flag
 static int32_t hp_filter_state = 0;
+static int32_t hp_filter_state_2 = 0;
 static int32_t lp_filter_state = 0;
 static int32_t lp_filter_state_2 = 0;
-static int32_t agc_gain = 256;
+static int32_t lp_filter_state_3 = 0;
 
 // encoder variables
 volatile u32 btn_prev_press_time = 0;
 static unsigned int enc_prev_press = 0;
+
+// hpf/lpf variables
+volatile u8 adjusting_lp_filter = 0;
+volatile u8 adjusting_hp_filter = 0;
+volatile u16 lp_filter_coeff = LP_FILTER_COEFF_DEFAULT;
+volatile u16 hp_filter_coeff = HP_FILTER_COEFF_DEFAULT;
 
 void BSP_init() {
 	// interrupt controller
@@ -91,50 +98,22 @@ void sampling_ISR() {
     int32_t audio_signal = curr_sample - dc_bias_drift;
 
     // HIGH-PASS FILTER (removes low-frequency rumble)
-    hp_filter_state = hp_filter_state + ((audio_signal - hp_filter_state) * HP_FILTER_COEFF >> 8);
+    hp_filter_state = hp_filter_state + ((audio_signal - hp_filter_state) * hp_filter_coeff >> 8);
 	// HPF = original signal - LPF; hp_filter_state is the LPF and subtracting it from 'audio_signal' returns the actual HPF signal
     int32_t filtered_signal = audio_signal - hp_filter_state;
 
-    // two cascaded LPF filter to remove high frequency squeals
-    lp_filter_state = lp_filter_state + ((filtered_signal - lp_filter_state) * LP_FILTER_COEFF >> 8);
-    lp_filter_state_2 = lp_filter_state_2 + ((lp_filter_state - lp_filter_state_2) * LP_FILTER_COEFF >> 8);
+    // two cascaded LPF filter (which forms a 2nd order filter) to remove high frequency squeals
+    lp_filter_state = lp_filter_state + ((filtered_signal - lp_filter_state) * lp_filter_coeff >> 8);
+    lp_filter_state_2 = lp_filter_state_2 + ((lp_filter_state - lp_filter_state_2) * lp_filter_coeff >> 8);
+    lp_filter_state_3 = lp_filter_state_3 + ((lp_filter_state_2 - lp_filter_state_3) * lp_filter_coeff >> 8);
 
     // now that we preserve the sign, we can shift safely
 	// scale the signal down to a nice number ideally between -1024 and 1024
     // int32_t scaled_signal = audio_signal >> 16; // change num back to 15 if it sounds bad
-    int32_t scaled_signal = lp_filter_state_2 >> 17;
-
-    // AUTOMATIC GAIN CONTROL (prevents feedback) - currently not used
-    // get the absolute value of scaled signal
-    int32_t input_level = (scaled_signal < 0) ? -scaled_signal : scaled_signal;
-    // Calculate gain reduction when input exceeds threshold
-    if (input_level > AGC_THRESHOLD) {
-        // Reduce gain proportionally to input level
-        // Gain reduction = (input_level - threshold) / reduction_rate
-        int32_t excess = input_level - AGC_THRESHOLD;
-//        xil_printf("Excess: %ld", excess);
-        int32_t gain_reduction = excess >> AGC_REDUCTION_RATE;  // Divide by 16
-//        xil_printf("Gain Reduction: %ld", gain_reduction);
-        agc_gain = 256 - gain_reduction;
-        if (agc_gain < AGC_MIN_GAIN) {
-            agc_gain = AGC_MIN_GAIN;  // Never go below minimum gain
-        }
-    } else {
-        // Gradually restore gain when input is below threshold
-        // Slowly increase gain back to full (256)
-        if (agc_gain < 256) {
-            agc_gain += 1;  // Slow recovery
-            if (agc_gain > 256) agc_gain = 256;
-        }
-    }
-
-    // Apply AGC gain to signal
-    // int32_t gain_signal = (scaled_signal * agc_gain) >> 8;
+    int32_t scaled_signal = lp_filter_state_3 >> 16; // revert back to 17if necessary
 
     // INPUT LIMITER (prevents clipping in processing chain)
     // Soft limiter: compress signal above threshold, which enables "soft clipping" (sounds better than maxing out the signal)
-    //int32_t limited_signal = gain_signal;
-
 	// JW Note: on Wed, we should print out scaled_signal at a fast rate to see how we can set a good INPUT LIMIT THRESHOLD
     int32_t limited_signal = scaled_signal;
     if (limited_signal > INPUT_LIMIT_THRESHOLD) {
@@ -249,6 +228,28 @@ void pushBtn_ISR(void *CallbackRef) {
 			xil_printf("Chorus OFF\r\n");
 		}
 	}
+    else if ((time_between_press > DEBOUNCE_TIME) && (btn_val & BTN_RIGHT)) {
+        btn_prev_press_time = btn_curr_press_time;
+        adjusting_lp_filter = !adjusting_lp_filter;
+        if (adjusting_lp_filter) {
+            adjusting_hp_filter = 0;  // Only one filter adjustment mode at a time
+            xil_printf("Adjusting LP Filter (current: %lu)\r\n", lp_filter_coeff);
+        }
+        else {
+            xil_printf("LP Filter adjustment OFF (coeff: %lu)\r\n", lp_filter_coeff);
+        }
+    }
+    else if ((time_between_press > DEBOUNCE_TIME) && (btn_val & BTN_LEFT)) {
+		btn_prev_press_time = btn_curr_press_time;
+		adjusting_hp_filter = !adjusting_hp_filter;
+		if (adjusting_hp_filter) {
+			adjusting_lp_filter = 0;  // Only one filter adjustment mode at a time
+			xil_printf("Adjusting HP Filter (current: %lu)\r\n", hp_filter_coeff);
+		}
+		else {
+			xil_printf("HP Filter adjustment OFF (coeff: %lu)\r\n", hp_filter_coeff);
+		}
+    }
 
 	XGpio_InterruptClear(GpioPtr, XGPIO_IR_CH1_MASK);
 }
@@ -432,14 +433,75 @@ void enc_ISR(void *CallbackRef) {
 			}
 		}
 	}
-	else {
+	else if (adjusting_hp_filter) {
+		// Adjust HP filter coefficient
+		// CCW = more filtering (lower coeff), CW = less filtering (higher coeff)
 		if (s_saw_cw) {
-			s_saw_cw  = 0;
+			s_saw_cw = 0;
+			if (hp_filter_coeff > HP_FILTER_COEFF_MIN) {
+				hp_filter_coeff -= FILTER_COEFF_ADJUST_STEP;
+				if (hp_filter_coeff < HP_FILTER_COEFF_MIN) {
+					hp_filter_coeff = HP_FILTER_COEFF_MIN;
+				}
+			} else {
+				hp_filter_coeff = HP_FILTER_COEFF_MIN;
+			}
+            u32 cutoff_hz = (hp_filter_coeff * 3035) / 100;  // 30.4 * coeff, scaled by 10 for integer math
+            xil_printf("HP Filter: %lu (cutoff: ~%lu Hz) - Less filtering\r\n", hp_filter_coeff, cutoff_hz);
+		}
+		if (s_saw_ccw) {
+			s_saw_ccw = 0;
+			if (hp_filter_coeff < HP_FILTER_COEFF_MAX) {
+				hp_filter_coeff += FILTER_COEFF_ADJUST_STEP;
+				if (hp_filter_coeff > HP_FILTER_COEFF_MAX) {
+					hp_filter_coeff = HP_FILTER_COEFF_MAX;
+				}
+			}
+			else {
+				hp_filter_coeff = HP_FILTER_COEFF_MAX;
+			}
+            u32 cutoff_hz = (hp_filter_coeff * 3035) / 100;  // 30.4 * coeff, scaled by 10 for integer math
+            xil_printf("HP Filter: %lu (cutoff: ~%lu Hz) - More filtering\r\n", hp_filter_coeff, cutoff_hz);
+		}
+	}
+	else if (adjusting_lp_filter) {
+		// Adjust LP filter coefficient
+		// CW = more filtering (lower coeff), CCW = less filtering (higher coeff)
+		if (s_saw_cw) {
+			s_saw_cw = 0;
+			if (lp_filter_coeff > LP_FILTER_COEFF_MIN) {
+				lp_filter_coeff -= FILTER_COEFF_ADJUST_STEP;
+				if (lp_filter_coeff < LP_FILTER_COEFF_MIN) {
+					lp_filter_coeff = LP_FILTER_COEFF_MIN;
+				}
+			} else {
+				lp_filter_coeff = LP_FILTER_COEFF_MIN;
+			}
+            u32 cutoff_hz = (lp_filter_coeff * 3035) / 100;  // 30.4 * coeff, scaled by 10 for integer math
+            xil_printf("LP Filter: %lu (cutoff: ~%lu Hz) - More filtering\r\n", lp_filter_coeff, cutoff_hz);
+		}
+		if (s_saw_ccw) {
+			s_saw_ccw = 0;
+			if (lp_filter_coeff < LP_FILTER_COEFF_MAX) {
+				lp_filter_coeff += FILTER_COEFF_ADJUST_STEP;
+				if (lp_filter_coeff > LP_FILTER_COEFF_MAX) {
+					lp_filter_coeff = LP_FILTER_COEFF_MAX;
+				}
+			} else {
+				lp_filter_coeff = LP_FILTER_COEFF_MAX;
+			}
+            u32 cutoff_hz = (lp_filter_coeff * 3035) / 100;  // 30.4 * coeff, scaled by 10 for integer math
+            xil_printf("LP Filter: %lu (cutoff: ~%lu Hz) - Less filtering\r\n", lp_filter_coeff, cutoff_hz);
+		}
+	}
+	else {
+		if (s_saw_ccw) {
+			s_saw_ccw  = 0;
 			xil_printf("CW turn\r\n");
 		}
 
-		if (s_saw_ccw) {
-			s_saw_ccw = 0;
+		if (s_saw_cw) {
+			s_saw_cw = 0;
 			xil_printf("CCW turn\r\n");
 		}
 	}
